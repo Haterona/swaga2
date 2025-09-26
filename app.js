@@ -36,25 +36,33 @@ function normalizeLevel(raw){
   return s;
 }
 
-function getSafeAuth(){
+function getAuthHeader(){
   let tok=(S.token.value||"").trim();
-  tok=tok.replace(/\s+/g,"");
   if(!tok) return null;
-  if(/[^\x21-\x7E]/.test(tok)) throw new Error("Invalid token characters.");
+  tok=tok.replace(/[\s\r\n\t]+/g,"");
   return "Bearer "+tok;
 }
 
 async function callApi(prompt,text){
-  const url="https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct";
+  const url="https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct?wait_for_model=true";
   const headers=new Headers();
-  headers.set("Content-Type","application/json");
-  const auth=getSafeAuth();
-  if(auth) headers.set("Authorization",auth);
-  const r=await fetch(url,{method:"POST",headers,body:JSON.stringify({inputs:prompt+text})});
-  if(r.status===402)throw new Error("Payment required or model unavailable (402). Provide a valid Hugging Face token.");
-  if(r.status===429)throw new Error("Rate limited (429). Please slow down and try again.");
-  if(!r.ok){let e=await r.text();throw new Error("API error "+r.status+": "+e.slice(0,200))}
-  let data=await r.json();
+  headers.set("Accept","application/json");
+  headers.set("Content-Type","application/json; charset=utf-8");
+  const auth=getAuthHeader(); if(auth) headers.set("Authorization",auth);
+  const r=await fetch(url,{
+    method:"POST",
+    mode:"cors",
+    cache:"no-store",
+    headers,
+    body:JSON.stringify({inputs:prompt+text})
+  });
+  if(r.status===401) throw new Error("Unauthorized (401). Check token and scopes.");
+  if(r.status===402) throw new Error("Payment required or gated model (402).");
+  if(r.status===403) throw new Error("Forbidden (403). Accept model terms or use a token with access.");
+  if(r.status===404) throw new Error("Model not found (404).");
+  if(r.status===429) throw new Error("Rate limited (429).");
+  if(!r.ok){ let e=await r.text(); throw new Error("API error "+r.status+": "+e.slice(0,200)); }
+  const data=await r.json();
   if(Array.isArray(data)&&data.length&&data[0].generated_text)return data[0].generated_text;
   if(data&&data.generated_text)return data.generated_text;
   if(typeof data==="string")return data;
