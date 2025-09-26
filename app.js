@@ -1,38 +1,26 @@
-// Глобальное состояние (инициализируется в init)
 const S={};
 
-// Показ/скрытие индикатора загрузки и блокировка кнопок
 function setSpin(v){
   S.spin.style.display=v?"inline-flex":"none";
   S.btnRandom.disabled=v; S.btnSent.disabled=v; S.btnNouns.disabled=v;
 }
-
-// Показ/скрытие блока ошибок
 function setErr(t){
   if(!t){ S.err.style.display="none"; S.err.textContent=""; return; }
   S.err.style.display="block"; S.err.textContent=t;
 }
-
-// Сопоставление текстовой метки сентимента с иконкой и стилем
 function mapSentIcon(lbl){
   if(lbl==="positive")return["👍","good","fa-regular fa-face-smile"];
   if(lbl==="negative")return["👎","bad","fa-regular fa-face-frown"];
   if(lbl==="neutral") return["❓","warn","fa-regular fa-face-meh"];
   return["❓","warn","fa-regular fa-face-meh"];
 }
-
-// Сопоставление уровня существительных с иконкой и стилем
 function mapNounIcon(lbl){
   if(lbl==="high"||lbl==="many")return["🟢","good"];
   if(lbl==="medium")return["🟡","warn"];
   if(lbl==="low"||lbl==="few")return["🔴","bad"];
   return["—","warn"];
 }
-
-// Первая строка ответа, нижний регистр
 function firstLineLower(t){ return (t||"").split(/\r?\n/)[0].toLowerCase().trim(); }
-
-// Нормализация ответа модели по сентименту
 function normalizeResp(raw){
   let s=firstLineLower(raw).replace(/^[^a-zа-яё]+/i,"");
   if(/positive|positif|положит|хорош|good/.test(s))return"positive";
@@ -40,8 +28,6 @@ function normalizeResp(raw){
   if(/neutral|нейтр/.test(s))return"neutral";
   return s;
 }
-
-// Нормализация ответа по уровню существительных
 function normalizeLevel(raw){
   let s=firstLineLower(raw);
   if(/\b(high|many|>?\s*15|\bmore than 15\b|более\s*15|много)\b/.test(s))return"high";
@@ -50,14 +36,21 @@ function normalizeLevel(raw){
   return s;
 }
 
-// Вызов API Hugging Face Falcon-7B-Instruct (text-generation)
+function getSafeAuth(){
+  let tok=(S.token.value||"").trim();
+  tok=tok.replace(/\s+/g,"");
+  if(!tok) return null;
+  if(/[^\x21-\x7E]/.test(tok)) throw new Error("Invalid token characters.");
+  return "Bearer "+tok;
+}
+
 async function callApi(prompt,text){
   const url="https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct";
-  const h={"Content-Type":"application/json"};
-  const tok=S.token.value.trim();
-  if(tok)h.Authorization="Bearer "+tok;
-  const body={inputs:prompt+text};
-  const r=await fetch(url,{method:"POST",headers:h,body:JSON.stringify(body)});
+  const headers=new Headers();
+  headers.set("Content-Type","application/json");
+  const auth=getSafeAuth();
+  if(auth) headers.set("Authorization",auth);
+  const r=await fetch(url,{method:"POST",headers,body:JSON.stringify({inputs:prompt+text})});
   if(r.status===402)throw new Error("Payment required or model unavailable (402). Provide a valid Hugging Face token.");
   if(r.status===429)throw new Error("Rate limited (429). Please slow down and try again.");
   if(!r.ok){let e=await r.text();throw new Error("API error "+r.status+": "+e.slice(0,200))}
@@ -68,7 +61,6 @@ async function callApi(prompt,text){
   return JSON.stringify(data);
 }
 
-// Выбор случайного отзыва и сброс результатов
 function rand(){
   if(!S.reviews.length){ setErr("No reviews loaded."); return; }
   const i=Math.floor(Math.random()*S.reviews.length);
@@ -81,7 +73,6 @@ function rand(){
   setErr("");
 }
 
-// Удаление URL, email и @упоминаний
 function stripNoise(t){
   return (t||"")
     .replace(/https?:\/\/\S+/g," ")
@@ -90,15 +81,11 @@ function stripNoise(t){
     .replace(/[^\S\r\n]+/g," ")
     .trim();
 }
-
-// Токенизация: слова и базовая пунктуация (без нестабильных Emoji-классов)
 function toTokens(t){
   const x=stripNoise(t).toLowerCase();
   const m=x.match(/([\p{L}\p{M}]+|[.,;:!?])/gu)||[];
   return m;
 }
-
-// Простейшая лемматизация en/ru через усечение окончаний
 function lemma(tok){
   if(!tok)return tok;
   let t=tok.toLowerCase();
@@ -107,19 +94,14 @@ function lemma(tok){
   t=t.replace(/(ами|ями|ов|ев|ом|ем|ам|ям|ах|ях|ую|юю|ое|ее|ая|яя|ий|ый|ой|ые|ие|ого|его|ему|ому|ими|ыми|ую|юю|ей|ьи|ью|ям|ах|tion|ment)$/,"");
   return t;
 }
-
-// Мини-лексикон базовых весов для сентимента
 const POS_LEX={
   pos:new Set(["good","great","excellent","love","like","wonderful","refreshing","delicious","easy","better","best","recommend","loved","amazing","perfect","удобн","хорош","отличн","любл","нрав","прекрасн","классн","супер","рекоменд"]),
   neg:new Set(["bad","worse","worst","awful","terrible","greasy","gross","harsh","notgood","hate","dislike","problem","issues","poor","tastes","smells","плох","хуже","ужасн","мерзк","жирн","проблем","неприятн","плохой","отврат"])
 };
-
-// Модификаторы/негаторы
 const NEGATORS=new Set(["не","нет","no","not","never"]);
 const BOOST=new Set(["very","очень"]);
 const MITI=new Set(["slightly","немного","чуть"]);
 
-// Локальная оценка тональности по правилам ТЗ
 function sentimentLocal(t){
   const toks=toTokens(t).map(lemma);
   let score=0,count=0;
@@ -149,7 +131,6 @@ function sentimentLocal(t){
   return{icon,confidence};
 }
 
-// Загрузка одного TSV по URL
 function fetchTSV(url){
   return new Promise((res,rej)=>{
     if(typeof Papa==="undefined"){ rej(new Error("Papa Parse not loaded")); return; }
@@ -160,8 +141,6 @@ function fetchTSV(url){
     });
   });
 }
-
-// Загрузка TSV с перебором имён (учёт "reviews_test (1).tsv")
 async function loadTSV(){
   const candidates=[
     "./reviews_test.tsv",
@@ -177,7 +156,35 @@ async function loadTSV(){
   throw new Error("TSV not found");
 }
 
-// Инициализация (важно вызывать даже если DOM уже загружен)
+async function onSent(){
+  const txt=S.textEl.textContent.trim();
+  if(!txt){ setErr("Select a review first."); return; }
+  setErr(""); setSpin(true);
+  try{
+    const out=await callApi("Classify this review as positive, negative, or neutral: ",txt);
+    const lbl=normalizeResp(out);
+    const [ico,cls,face]=mapSentIcon(lbl);
+    const local=sentimentLocal(txt);
+    S.sent.querySelector("span").textContent="Sentiment: "+ico;
+    S.sent.className="pill "+cls;
+    S.sent.querySelector("i").className=face;
+    S.sent.title="local:"+local.icon+" "+Math.round(local.confidence*100)+"%";
+  }catch(e){ setErr(e.message); } finally{ setSpin(false); }
+}
+async function onNouns(){
+  const txt=S.textEl.textContent.trim();
+  if(!txt){ setErr("Select a review first."); return; }
+  setErr(""); setSpin(true);
+  try{
+    const out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). ",txt);
+    let s=normalizeLevel(out);
+    if(/many|high/.test(s))s="high"; else if(/medium/.test(s))s="medium"; else if(/few|low/.test(s))s="low";
+    const [ico,cls]=mapNounIcon(s);
+    S.nouns.querySelector("span").textContent="Noun level: "+ico;
+    S.nouns.className="pill "+cls;
+  }catch(e){ setErr(e.message); } finally{ setSpin(false); }
+}
+
 function init(){
   S.reviews=[];
   S.textEl=document.getElementById("text");
@@ -191,45 +198,12 @@ function init(){
   S.nouns=document.getElementById("nouns");
 
   S.btnRandom.addEventListener("click",rand);
-  S.btnSent.addEventListener("click",async()=>{
-    const txt=S.textEl.textContent.trim();
-    if(!txt){ setErr("Select a review first."); return; }
-    setErr(""); setSpin(true);
-    try{
-      const out=await callApi("Classify this review as positive, negative, or neutral: ",txt);
-      const lbl=normalizeResp(out);
-      const [ico,cls,face]=mapSentIcon(lbl);
-      const local=sentimentLocal(txt);
-      S.sent.querySelector("span").textContent="Sentiment: "+ico;
-      S.sent.className="pill "+cls;
-      S.sent.querySelector("i").className=face;
-      S.sent.title="local:"+local.icon+" "+Math.round(local.confidence*100)+"%";
-    }catch(e){ setErr(e.message); } finally{ setSpin(false); }
-  });
-  S.btnNouns.addEventListener("click",async()=>{
-    const txt=S.textEl.textContent.trim();
-    if(!txt){ setErr("Select a review first."); return; }
-    setErr(""); setSpin(true);
-    try{
-      const out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). ",txt);
-      let s=normalizeLevel(out);
-      if(/many|high/.test(s))s="high"; else if(/medium/.test(s))s="medium"; else if(/few|low/.test(s))s="low";
-      const [ico,cls]=mapNounIcon(s);
-      S.nouns.querySelector("span").textContent="Noun level: "+ico;
-      S.nouns.className="pill "+cls;
-    }catch(e){ setErr(e.message); } finally{ setSpin(false); }
-  });
+  S.btnSent.addEventListener("click",onSent);
+  S.btnNouns.addEventListener("click",onNouns);
 
   (async()=>{
     try{ S.reviews=await loadTSV(); rand(); }
     catch(e){ setErr("Failed to load TSV: "+e.message); }
   })();
 }
-
-// Фикс: если скрипт подключён внизу body без defer, DOMContentLoaded мог уже произойти.
-// Гарантируем вызов init в любом случае.
-if(document.readyState==="loading"){
-  document.addEventListener("DOMContentLoaded",init);
-}else{
-  init();
-}
+if(document.readyState==="loading"){ document.addEventListener("DOMContentLoaded",init); } else { init(); }
