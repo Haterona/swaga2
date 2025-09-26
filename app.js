@@ -91,10 +91,9 @@ function stripNoise(t){
     .trim();
 }
 
-// Токенизация: слова и базовая пунктуация (без нестабильных Unicode-свойств Emoji)
+// Токенизация: слова и базовая пунктуация
 function toTokens(t){
   const x=stripNoise(t).toLowerCase();
-  // Слова (буквы + диакритика) и знаки препинания для отсечения по пунктуации
   const m=x.match(/([\p{L}\p{M}]+|[.,;:!?])/gu)||[];
   return m;
 }
@@ -150,15 +149,33 @@ function sentimentLocal(t){
   return{icon,confidence};
 }
 
-// Загрузка TSV через Papa Parse → массив отзывов
-async function loadTSV(){
+// Вспомогательная загрузка одного TSV по URL
+function fetchTSV(url){
   return new Promise((res,rej)=>{
-    Papa.parse("./reviews_test.tsv",{
+    Papa.parse(url,{
       download:true, delimiter:"\t", header:true, skipEmptyLines:true,
       complete:r=>{ const rows=(r.data||[]).filter(x=>x&&x.text); res(rows); },
       error:e=>rej(e)
     });
   });
+}
+
+// Загрузка TSV с перебором возможных имён (учёт файла "reviews_test (1).tsv")
+async function loadTSV(){
+  const candidates=[
+    "./reviews_test.tsv",
+    "./reviews_test (1).tsv",
+    "./reviews_test%20(1).tsv"
+  ];
+  const tried=[];
+  for(const c of candidates){
+    try{
+      const rows=await fetchTSV(c);
+      if(rows.length){ return rows; }
+      tried.push(c);
+    }catch(e){ tried.push(c); }
+  }
+  throw new Error("TSV not found. Tried: "+tried.join(", "));
 }
 
 // Обработчик "Analyze Sentiment"
@@ -211,8 +228,12 @@ function init(){
   S.btnNouns.addEventListener("click",onNouns);
 
   (async()=>{
-    try{ S.reviews=await loadTSV(); rand(); }
-    catch(e){ setErr("Failed to load TSV"); }
+    try{
+      S.reviews=await loadTSV();
+      rand();
+    }catch(e){
+      setErr("Failed to load TSV: "+e.message);
+    }
   })();
 }
 
