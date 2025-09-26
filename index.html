@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Review Analyzer</title>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<style>
+  :root{--bg:#0f1115;--fg:#e6e6e9;--muted:#9aa0a6;--card:#171a21;--accent:#3a86ff;--bad:#ff4d4f;--warn:#ffcc00;--good:#22c55e}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,"Helvetica Neue",Arial,"Apple Color Emoji","Segoe UI Emoji";}
+  .wrap{max-width:780px;margin:40px auto;padding:20px}
+  h1{margin:0 0 16px;font-size:24px}
+  .bar{display:grid;grid-template-columns:1fr;gap:12px}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  input[type="password"],input[type="text"]{background:#11141a;border:1px solid #222734;border-radius:10px;padding:10px 12px;color:var(--fg);flex:1;min-width:240px}
+  .btn{cursor:pointer;border:1px solid #2a2f3d;background:#151923;color:var(--fg);padding:10px 14px;border-radius:10px;transition:.15s;display:inline-flex;gap:8px;align-items:center}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn:hover{border-color:#3a4154;background:#1a1f2a}
+  .grid{display:grid;grid-template-columns:1fr;gap:12px}
+  .card{background:var(--card);border:1px solid #222734;border-radius:14px;padding:16px}
+  .label{font-size:12px;color:var(--muted);margin-bottom:6px}
+  #text{white-space:pre-wrap;line-height:1.5}
+  .status{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+  .pill{display:inline-flex;align-items:center;gap:8px;border:1px solid #2a2f3d;background:#11141a;border-radius:999px;padding:8px 12px}
+  .pill i{opacity:.9}
+  .pill.bad{border-color:var(--bad)}
+  .pill.warn{border-color:var(--warn)}
+  .pill.good{border-color:var(--good)}
+  #err{display:none;background:rgba(255,77,79,.12);border:1px solid var(--bad);color:#ffb3b3;padding:10px 12px;border-radius:12px}
+  .spinner{display:none}
+  .spinner i{animation:spin 1s linear infinite;color:var(--accent)}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (min-width:700px){.bar{grid-template-columns:1fr auto}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Review Analyzer</h1>
+  <div class="bar">
+    <div class="row">
+      <input id="token" type="password" placeholder="Hugging Face token (optional)">
+    </div>
+    <div class="row">
+      <button id="btnRandom" class="btn"><i class="fa-solid fa-shuffle"></i><span>Select Random Review</span></button>
+      <button id="btnSent" class="btn"><i class="fa-solid fa-magnifying-glass-chart"></i><span>Analyze Sentiment</span></button>
+      <button id="btnNouns" class="btn"><i class="fa-solid fa-spell-check"></i><span>Count Nouns</span></button>
+      <div class="spinner" id="spin"><i class="fa-solid fa-circle-notch"></i></div>
+    </div>
+  </div>
+  <div class="grid" style="margin-top:14px">
+    <div id="err"></div>
+    <div class="card">
+      <div class="label">Review</div>
+      <div id="text"></div>
+    </div>
+    <div class="card">
+      <div class="label">Results</div>
+      <div class="status">
+        <div class="pill" id="sent"><i class="fa-regular fa-face-meh"></i><span>Sentiment: —</span></div>
+        <div class="pill" id="nouns"><i class="fa-regular fa-circle-dot"></i><span>Noun level: —</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="./app.js"></script>
+</body>
+</html>
