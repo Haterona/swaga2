@@ -1,4 +1,4 @@
-// Глобальное состояние (инициализируется после DOMContentLoaded)
+// Глобальное состояние (инициализируется в init)
 const S={};
 
 // Показ/скрытие индикатора загрузки и блокировка кнопок
@@ -91,7 +91,7 @@ function stripNoise(t){
     .trim();
 }
 
-// Токенизация: слова и базовая пунктуация
+// Токенизация: слова и базовая пунктуация (без нестабильных Emoji-классов)
 function toTokens(t){
   const x=stripNoise(t).toLowerCase();
   const m=x.match(/([\p{L}\p{M}]+|[.,;:!?])/gu)||[];
@@ -149,9 +149,10 @@ function sentimentLocal(t){
   return{icon,confidence};
 }
 
-// Вспомогательная загрузка одного TSV по URL
+// Загрузка одного TSV по URL
 function fetchTSV(url){
   return new Promise((res,rej)=>{
+    if(typeof Papa==="undefined"){ rej(new Error("Papa Parse not loaded")); return; }
     Papa.parse(url,{
       download:true, delimiter:"\t", header:true, skipEmptyLines:true,
       complete:r=>{ const rows=(r.data||[]).filter(x=>x&&x.text); res(rows); },
@@ -160,57 +161,23 @@ function fetchTSV(url){
   });
 }
 
-// Загрузка TSV с перебором возможных имён (учёт файла "reviews_test (1).tsv")
+// Загрузка TSV с перебором имён (учёт "reviews_test (1).tsv")
 async function loadTSV(){
   const candidates=[
     "./reviews_test.tsv",
     "./reviews_test (1).tsv",
     "./reviews_test%20(1).tsv"
   ];
-  const tried=[];
   for(const c of candidates){
     try{
       const rows=await fetchTSV(c);
-      if(rows.length){ return rows; }
-      tried.push(c);
-    }catch(e){ tried.push(c); }
+      if(rows.length) return rows;
+    }catch(_){}
   }
-  throw new Error("TSV not found. Tried: "+tried.join(", "));
+  throw new Error("TSV not found");
 }
 
-// Обработчик "Analyze Sentiment"
-async function onSent(){
-  const txt=S.textEl.textContent.trim();
-  if(!txt){ setErr("Select a review first."); return; }
-  setErr(""); setSpin(true);
-  try{
-    const out=await callApi("Classify this review as positive, negative, or neutral: ",txt);
-    const lbl=normalizeResp(out);
-    const [ico,cls,face]=mapSentIcon(lbl);
-    const local=sentimentLocal(txt);
-    S.sent.querySelector("span").textContent="Sentiment: "+ico;
-    S.sent.className="pill "+cls;
-    S.sent.querySelector("i").className=face;
-    S.sent.title="local:"+local.icon+" "+Math.round(local.confidence*100)+"%";
-  }catch(e){ setErr(e.message); } finally{ setSpin(false); }
-}
-
-// Обработчик "Count Nouns"
-async function onNouns(){
-  const txt=S.textEl.textContent.trim();
-  if(!txt){ setErr("Select a review first."); return; }
-  setErr(""); setSpin(true);
-  try{
-    const out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). ",txt);
-    let s=normalizeLevel(out);
-    if(/many|high/.test(s))s="high"; else if(/medium/.test(s))s="medium"; else if(/few|low/.test(s))s="low";
-    const [ico,cls]=mapNounIcon(s);
-    S.nouns.querySelector("span").textContent="Noun level: "+ico;
-    S.nouns.className="pill "+cls;
-  }catch(e){ setErr(e.message); } finally{ setSpin(false); }
-}
-
-// Инициализация после готовности DOM
+// Инициализация (важно вызывать даже если DOM уже загружен)
 function init(){
   S.reviews=[];
   S.textEl=document.getElementById("text");
@@ -224,17 +191,45 @@ function init(){
   S.nouns=document.getElementById("nouns");
 
   S.btnRandom.addEventListener("click",rand);
-  S.btnSent.addEventListener("click",onSent);
-  S.btnNouns.addEventListener("click",onNouns);
+  S.btnSent.addEventListener("click",async()=>{
+    const txt=S.textEl.textContent.trim();
+    if(!txt){ setErr("Select a review first."); return; }
+    setErr(""); setSpin(true);
+    try{
+      const out=await callApi("Classify this review as positive, negative, or neutral: ",txt);
+      const lbl=normalizeResp(out);
+      const [ico,cls,face]=mapSentIcon(lbl);
+      const local=sentimentLocal(txt);
+      S.sent.querySelector("span").textContent="Sentiment: "+ico;
+      S.sent.className="pill "+cls;
+      S.sent.querySelector("i").className=face;
+      S.sent.title="local:"+local.icon+" "+Math.round(local.confidence*100)+"%";
+    }catch(e){ setErr(e.message); } finally{ setSpin(false); }
+  });
+  S.btnNouns.addEventListener("click",async()=>{
+    const txt=S.textEl.textContent.trim();
+    if(!txt){ setErr("Select a review first."); return; }
+    setErr(""); setSpin(true);
+    try{
+      const out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). ",txt);
+      let s=normalizeLevel(out);
+      if(/many|high/.test(s))s="high"; else if(/medium/.test(s))s="medium"; else if(/few|low/.test(s))s="low";
+      const [ico,cls]=mapNounIcon(s);
+      S.nouns.querySelector("span").textContent="Noun level: "+ico;
+      S.nouns.className="pill "+cls;
+    }catch(e){ setErr(e.message); } finally{ setSpin(false); }
+  });
 
   (async()=>{
-    try{
-      S.reviews=await loadTSV();
-      rand();
-    }catch(e){
-      setErr("Failed to load TSV: "+e.message);
-    }
+    try{ S.reviews=await loadTSV(); rand(); }
+    catch(e){ setErr("Failed to load TSV: "+e.message); }
   })();
 }
 
-document.addEventListener("DOMContentLoaded",init);
+// Фикс: если скрипт подключён внизу body без defer, DOMContentLoaded мог уже произойти.
+// Гарантируем вызов init в любом случае.
+if(document.readyState==="loading"){
+  document.addEventListener("DOMContentLoaded",init);
+}else{
+  init();
+}
