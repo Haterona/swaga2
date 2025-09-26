@@ -36,15 +36,19 @@ function normalizeLevel(raw){
   return s;
 }
 
+/* ---------- Inference API: switched to a public, free model that works ----------
+   Falcon-7B-Instruct often returns 404/403 via the Inference API for free tokens.
+   Use: mistralai/Mistral-7B-Instruct-v0.2 (text-generation) */
+const MODEL_ID="mistralai/Mistral-7B-Instruct-v0.2";
+
 function getAuthHeader(){
   let tok=(S.token.value||"").trim();
   if(!tok) return null;
   tok=tok.replace(/[\s\r\n\t]+/g,"");
   return "Bearer "+tok;
 }
-
 async function callApi(prompt,text){
-  const url="https://api-inference.huggingface.co/models/tiiuae/falcon-7b-instruct?wait_for_model=true";
+  const url=`https://api-inference.huggingface.co/models/${MODEL_ID}?wait_for_model=true`;
   const headers=new Headers();
   headers.set("Accept","application/json");
   headers.set("Content-Type","application/json; charset=utf-8");
@@ -59,8 +63,8 @@ async function callApi(prompt,text){
   if(r.status===401) throw new Error("Unauthorized (401). Check token and scopes.");
   if(r.status===402) throw new Error("Payment required or gated model (402).");
   if(r.status===403) throw new Error("Forbidden (403). Accept model terms or use a token with access.");
-  if(r.status===404) throw new Error("Model not found (404).");
-  if(r.status===429) throw new Error("Rate limited (429).");
+  if(r.status===404) throw new Error("Model not found (404). Endpoint unavailable.");
+  if(r.status===429) throw new Error("Rate limited (429). Try again later.");
   if(!r.ok){ let e=await r.text(); throw new Error("API error "+r.status+": "+e.slice(0,200)); }
   const data=await r.json();
   if(Array.isArray(data)&&data.length&&data[0].generated_text)return data[0].generated_text;
@@ -69,6 +73,7 @@ async function callApi(prompt,text){
   return JSON.stringify(data);
 }
 
+/* ---------------- Local sentiment scoring (spec) ---------------- */
 function rand(){
   if(!S.reviews.length){ setErr("No reviews loaded."); return; }
   const i=Math.floor(Math.random()*S.reviews.length);
@@ -80,7 +85,6 @@ function rand(){
   S.nouns.className="pill";
   setErr("");
 }
-
 function stripNoise(t){
   return (t||"")
     .replace(/https?:\/\/\S+/g," ")
@@ -109,7 +113,6 @@ const POS_LEX={
 const NEGATORS=new Set(["не","нет","no","not","never"]);
 const BOOST=new Set(["very","очень"]);
 const MITI=new Set(["slightly","немного","чуть"]);
-
 function sentimentLocal(t){
   const toks=toTokens(t).map(lemma);
   let score=0,count=0;
@@ -139,6 +142,7 @@ function sentimentLocal(t){
   return{icon,confidence};
 }
 
+/* ---------------- TSV loading ---------------- */
 function fetchTSV(url){
   return new Promise((res,rej)=>{
     if(typeof Papa==="undefined"){ rej(new Error("Papa Parse not loaded")); return; }
@@ -150,20 +154,14 @@ function fetchTSV(url){
   });
 }
 async function loadTSV(){
-  const candidates=[
-    "./reviews_test.tsv",
-    "./reviews_test (1).tsv",
-    "./reviews_test%20(1).tsv"
-  ];
+  const candidates=["./reviews_test.tsv","./reviews_test (1).tsv","./reviews_test%20(1).tsv"];
   for(const c of candidates){
-    try{
-      const rows=await fetchTSV(c);
-      if(rows.length) return rows;
-    }catch(_){}
+    try{ const rows=await fetchTSV(c); if(rows.length) return rows; }catch(_){}
   }
   throw new Error("TSV not found");
 }
 
+/* ---------------- Handlers ---------------- */
 async function onSent(){
   const txt=S.textEl.textContent.trim();
   if(!txt){ setErr("Select a review first."); return; }
@@ -193,6 +191,7 @@ async function onNouns(){
   }catch(e){ setErr(e.message); } finally{ setSpin(false); }
 }
 
+/* ---------------- Init ---------------- */
 function init(){
   S.reviews=[];
   S.textEl=document.getElementById("text");
@@ -209,9 +208,6 @@ function init(){
   S.btnSent.addEventListener("click",onSent);
   S.btnNouns.addEventListener("click",onNouns);
 
-  (async()=>{
-    try{ S.reviews=await loadTSV(); rand(); }
-    catch(e){ setErr("Failed to load TSV: "+e.message); }
-  })();
+  (async()=>{ try{ S.reviews=await loadTSV(); rand(); } catch(e){ setErr("Failed to load TSV: "+e.message); } })();
 }
 if(document.readyState==="loading"){ document.addEventListener("DOMContentLoaded",init); } else { init(); }
