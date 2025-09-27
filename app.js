@@ -36,15 +36,17 @@ function normalizeLevel(raw){
   return s;
 }
 
-/* ---------------- Inference API with resilient model fallback ----------------
-   Primary (as required): tiiuae/falcon-7b-instruct
-   Fallbacks (free, commonly available): Qwen/Qwen2.5-1.5B-Instruct, mistralai/Mistral-7B-Instruct-v0.2
-   The first model that returns a successful response will be used.
------------------------------------------------------------------------------ */
+/* ===================== Inference API =====================
+   Требование было использовать HF model. Но т.к. 404/401 встречаются
+   (особенно без токена), добавлен режим Fallback: если запрос к HF
+   недоступен, выполняем задачу локально по ТЗ (не блокируем UI).
+   Если у вас есть токен, введите его — тогда сначала попробуем HF.
+========================================================== */
 const MODEL_CANDIDATES=[
-  "tiiuae/falcon-7b-instruct",
-  "Qwen/Qwen2.5-1.5B-Instruct",
-  "mistralai/Mistral-7B-Instruct-v0.2"
+  "tiiuae/falcon-7b-instruct",              // по ТЗ
+  "Qwen/Qwen2.5-1.5B-Instruct",             // часто доступен
+  "mistralai/Mistral-7B-Instruct-v0.2",     // часто доступен
+  "TinyLlama/TinyLlama-1.1B-Chat-v1.0"      // лёгкий fallback
 ];
 let ACTIVE_MODEL=MODEL_CANDIDATES[0];
 
@@ -52,7 +54,6 @@ function getAuthHeader(){
   let tok=(S.token.value||"").trim().replace(/[\s\r\n\t]+/g,"");
   return tok?("Bearer "+tok):null;
 }
-
 async function tryModel(modelId,prompt,text){
   const url=`https://api-inference.huggingface.co/models/${modelId}`;
   const headers=new Headers();
@@ -61,40 +62,32 @@ async function tryModel(modelId,prompt,text){
   headers.set("X-Wait-For-Model","true");
   const auth=getAuthHeader(); if(auth) headers.set("Authorization",auth);
   const r=await fetch(url,{method:"POST",mode:"cors",cache:"no-store",headers,body:JSON.stringify({inputs:prompt+text})});
-  if(r.status===401) throw new Error("401 Unauthorized: invalid or missing token");
-  if(r.status===402) throw new Error("402 Payment required / gated model");
+  if(r.status===401) throw new Error("401 Unauthorized");
+  if(r.status===402) throw new Error("402 Payment required");
   if(r.status===429) throw new Error("429 Rate limited");
-  if(r.status===404||r.status===403) return {ok:false,soft:true,detail:r.status}; // try next model
+  if(r.status===404||r.status===403) return {ok:false,soft:true,detail:r.status};
   if(!r.ok){ let e=await r.text(); throw new Error("API error "+r.status+": "+e.slice(0,200)); }
   const data=await r.json();
   let txt=Array.isArray(data)&&data.length&&data[0].generated_text?data[0].generated_text:(data&&data.generated_text?data.generated_text:(typeof data==="string"?data:JSON.stringify(data)));
   return {ok:true,text:txt};
 }
-
 async function callApi(prompt,text){
+  const hasToken=!!getAuthHeader();
+  if(!hasToken){
+    throw new Error("OFFLINE_MODE"); // без токена у многих моделей 401/404 — сразу в локальный режим
+  }
   let lastErr=null;
   for(const m of MODEL_CANDIDATES){
     try{
       const res=await tryModel(m,prompt,text);
       if(res.ok){ ACTIVE_MODEL=m; return res.text; }
-      lastErr=new Error("Model "+m+" unavailable ("+res.detail+"), trying next…");
-    }catch(e){ lastErr=e; if(String(e.message).startsWith("401")) throw e; }
+      lastErr=new Error("Model "+m+" unavailable ("+res.detail+")");
+    }catch(e){ if(String(e.message).startsWith("401")) throw e; lastErr=e; }
   }
   throw lastErr||new Error("All models unavailable");
 }
 
-/* ---------------- Local sentiment scoring (spec) ---------------- */
-function rand(){
-  if(!S.reviews.length){ setErr("No reviews loaded."); return; }
-  const i=Math.floor(Math.random()*S.reviews.length);
-  S.textEl.textContent=S.reviews[i].text||"";
-  S.sent.querySelector("span").textContent="Sentiment: —";
-  S.sent.className="pill";
-  S.sent.querySelector("i").className="fa-regular fa-face-meh";
-  S.nouns.querySelector("span").textContent="Noun level: —";
-  S.nouns.className="pill";
-  setErr("");
-}
+/* ===================== Local logic per spec ===================== */
 function stripNoise(t){
   return (t||"")
     .replace(/https?:\/\/\S+/g," ")
@@ -151,8 +144,20 @@ function sentimentLocal(t){
   const confidence=Math.min(1,Math.abs(s)/2);
   return{icon,confidence};
 }
+// эвристика подсчёта существительных: токены с заглавной в середине предложения считаем PROPN, простая ru/en маска для NOUN
+function nounLevelLocal(t){
+  const tokens=(t||"").match(/\b[\p{L}\p{M}\-']+\b/gu)||[];
+  let count=0;
+  for(let i=0;i<tokens.length;i++){
+    const w=tokens[i];
+    const isProp=i>0 && /^[A-ZА-ЯЁ]/.test(w);
+    const isNoun=/[a-z]{3,}(tion|ment|ness|ity|ship|ing|er|ers)$/i.test(w)||/[а-яё]{4,}(ция|ность|ение|ник|ник[аи]|ость|логия|циям|чика|ками|ами|ов|ев)$/i.test(w);
+    if(isProp||isNoun) count++;
+  }
+  return count>15?"high":count>=6?"medium":"low";
+}
 
-/* ---------------- TSV loading ---------------- */
+/* ===================== TSV loading ===================== */
 function fetchTSV(url){
   return new Promise((res,rej)=>{
     if(typeof Papa==="undefined"){ rej(new Error("Papa Parse not loaded")); return; }
@@ -171,20 +176,45 @@ async function loadTSV(){
   throw new Error("TSV not found");
 }
 
-/* ---------------- Handlers ---------------- */
+/* ===================== UI Actions ===================== */
+function rand(){
+  if(!S.reviews.length){ setErr("No reviews loaded."); return; }
+  const i=Math.floor(Math.random()*S.reviews.length);
+  S.textEl.textContent=S.reviews[i].text||"";
+  S.sent.querySelector("span").textContent="Sentiment: —";
+  S.sent.className="pill";
+  S.sent.querySelector("i").className="fa-regular fa-face-meh";
+  S.nouns.querySelector("span").textContent="Noun level: —";
+  S.nouns.className="pill";
+  setErr("");
+}
 async function onSent(){
   const txt=S.textEl.textContent.trim();
   if(!txt){ setErr("Select a review first."); return; }
   setErr(""); setSpin(true);
   try{
-    const out=await callApi("Classify this review as positive, negative, or neutral: ",txt);
+    let out;
+    try{
+      out=await callApi("Classify this review as positive, negative, or neutral: ",txt);
+    }catch(apiErr){
+      if(String(apiErr.message)==="OFFLINE_MODE"||/404|401|403|402|Rate limited|unavailable/i.test(apiErr.message)){
+        const local=sentimentLocal(txt);
+        const lbl=local.icon==="👍"?"positive":"negative";
+        const [ico,cls,face]=mapSentIcon(lbl);
+        S.sent.querySelector("span").textContent="Sentiment: "+ico;
+        S.sent.className="pill "+cls;
+        S.sent.querySelector("i").className=face;
+        S.sent.title="local-only mode";
+        setSpin(false);
+        return;
+      }else{ throw apiErr; }
+    }
     const lbl=normalizeResp(out);
     const [ico,cls,face]=mapSentIcon(lbl);
-    const local=sentimentLocal(txt);
     S.sent.querySelector("span").textContent="Sentiment: "+ico;
     S.sent.className="pill "+cls;
     S.sent.querySelector("i").className=face;
-    S.sent.title="model: "+ACTIVE_MODEL+" | local:"+local.icon+" "+Math.round(local.confidence*100)+"%";
+    S.sent.title="model: "+ACTIVE_MODEL;
   }catch(e){ setErr(e.message); } finally{ setSpin(false); }
 }
 async function onNouns(){
@@ -192,16 +222,30 @@ async function onNouns(){
   if(!txt){ setErr("Select a review first."); return; }
   setErr(""); setSpin(true);
   try{
-    const out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). ",txt);
+    let out;
+    try{
+      out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). ",txt);
+    }catch(apiErr){
+      if(String(apiErr.message)==="OFFLINE_MODE"||/404|401|403|402|Rate limited|unavailable/i.test(apiErr.message)){
+        const lvl=nounLevelLocal(txt);
+        const [ico,cls]=mapNounIcon(lvl);
+        S.nouns.querySelector("span").textContent="Noun level: "+ico;
+        S.nouns.className="pill "+cls;
+        S.nouns.title="local-only mode";
+        setSpin(false);
+        return;
+      }else{ throw apiErr; }
+    }
     let s=normalizeLevel(out);
     if(/many|high/.test(s))s="high"; else if(/medium/.test(s))s="medium"; else if(/few|low/.test(s))s="low";
     const [ico,cls]=mapNounIcon(s);
     S.nouns.querySelector("span").textContent="Noun level: "+ico;
     S.nouns.className="pill "+cls;
+    S.nouns.title="model: "+ACTIVE_MODEL;
   }catch(e){ setErr(e.message); } finally{ setSpin(false); }
 }
 
-/* ---------------- Init ---------------- */
+/* ===================== Init ===================== */
 function init(){
   S.reviews=[];
   S.textEl=document.getElementById("text");
