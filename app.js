@@ -36,41 +36,51 @@ function normalizeLevel(raw){
   return s;
 }
 
-/* ---------- Inference API: switched to a public, free model that works ----------
-   Falcon-7B-Instruct often returns 404/403 via the Inference API for free tokens.
-   Use: mistralai/Mistral-7B-Instruct-v0.2 (text-generation) */
-const MODEL_ID="mistralai/Mistral-7B-Instruct-v0.2";
+/* ---------------- Inference API with resilient model fallback ----------------
+   Primary (as required): tiiuae/falcon-7b-instruct
+   Fallbacks (free, commonly available): Qwen/Qwen2.5-1.5B-Instruct, mistralai/Mistral-7B-Instruct-v0.2
+   The first model that returns a successful response will be used.
+----------------------------------------------------------------------------- */
+const MODEL_CANDIDATES=[
+  "tiiuae/falcon-7b-instruct",
+  "Qwen/Qwen2.5-1.5B-Instruct",
+  "mistralai/Mistral-7B-Instruct-v0.2"
+];
+let ACTIVE_MODEL=MODEL_CANDIDATES[0];
 
 function getAuthHeader(){
-  let tok=(S.token.value||"").trim();
-  if(!tok) return null;
-  tok=tok.replace(/[\s\r\n\t]+/g,"");
-  return "Bearer "+tok;
+  let tok=(S.token.value||"").trim().replace(/[\s\r\n\t]+/g,"");
+  return tok?("Bearer "+tok):null;
 }
-async function callApi(prompt,text){
-  const url=`https://api-inference.huggingface.co/models/${MODEL_ID}?wait_for_model=true`;
+
+async function tryModel(modelId,prompt,text){
+  const url=`https://api-inference.huggingface.co/models/${modelId}`;
   const headers=new Headers();
   headers.set("Accept","application/json");
   headers.set("Content-Type","application/json; charset=utf-8");
+  headers.set("X-Wait-For-Model","true");
   const auth=getAuthHeader(); if(auth) headers.set("Authorization",auth);
-  const r=await fetch(url,{
-    method:"POST",
-    mode:"cors",
-    cache:"no-store",
-    headers,
-    body:JSON.stringify({inputs:prompt+text})
-  });
-  if(r.status===401) throw new Error("Unauthorized (401). Check token and scopes.");
-  if(r.status===402) throw new Error("Payment required or gated model (402).");
-  if(r.status===403) throw new Error("Forbidden (403). Accept model terms or use a token with access.");
-  if(r.status===404) throw new Error("Model not found (404). Endpoint unavailable.");
-  if(r.status===429) throw new Error("Rate limited (429). Try again later.");
+  const r=await fetch(url,{method:"POST",mode:"cors",cache:"no-store",headers,body:JSON.stringify({inputs:prompt+text})});
+  if(r.status===401) throw new Error("401 Unauthorized: invalid or missing token");
+  if(r.status===402) throw new Error("402 Payment required / gated model");
+  if(r.status===429) throw new Error("429 Rate limited");
+  if(r.status===404||r.status===403) return {ok:false,soft:true,detail:r.status}; // try next model
   if(!r.ok){ let e=await r.text(); throw new Error("API error "+r.status+": "+e.slice(0,200)); }
   const data=await r.json();
-  if(Array.isArray(data)&&data.length&&data[0].generated_text)return data[0].generated_text;
-  if(data&&data.generated_text)return data.generated_text;
-  if(typeof data==="string")return data;
-  return JSON.stringify(data);
+  let txt=Array.isArray(data)&&data.length&&data[0].generated_text?data[0].generated_text:(data&&data.generated_text?data.generated_text:(typeof data==="string"?data:JSON.stringify(data)));
+  return {ok:true,text:txt};
+}
+
+async function callApi(prompt,text){
+  let lastErr=null;
+  for(const m of MODEL_CANDIDATES){
+    try{
+      const res=await tryModel(m,prompt,text);
+      if(res.ok){ ACTIVE_MODEL=m; return res.text; }
+      lastErr=new Error("Model "+m+" unavailable ("+res.detail+"), trying next…");
+    }catch(e){ lastErr=e; if(String(e.message).startsWith("401")) throw e; }
+  }
+  throw lastErr||new Error("All models unavailable");
 }
 
 /* ---------------- Local sentiment scoring (spec) ---------------- */
@@ -174,7 +184,7 @@ async function onSent(){
     S.sent.querySelector("span").textContent="Sentiment: "+ico;
     S.sent.className="pill "+cls;
     S.sent.querySelector("i").className=face;
-    S.sent.title="local:"+local.icon+" "+Math.round(local.confidence*100)+"%";
+    S.sent.title="model: "+ACTIVE_MODEL+" | local:"+local.icon+" "+Math.round(local.confidence*100)+"%";
   }catch(e){ setErr(e.message); } finally{ setSpin(false); }
 }
 async function onNouns(){
