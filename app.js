@@ -49,13 +49,22 @@ function normalizeLevel(raw){
   return s;
 }
 
-/* ===================== Inference API ===================== */
-const MODEL_CANDIDATES=[
+/* ===================== HF модели и вспомогательные ===================== */
+// ✅ Генеративные (запасной путь, если профильные модели недоступны)
+const TEXTGEN_MODELS=[
   "HuggingFaceH4/smol-llama-3.2-1.7B-instruct",
-  "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-  "Qwen/Qwen2.5-1.5B-Instruct"
+  "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 ];
-let ACTIVE_MODEL=MODEL_CANDIDATES[0];
+// ✅ Профильные модели под задачи (чаще доступны и быстрее отдают ответ)
+const SENTIMENT_MODEL="cardiffnlp/twitter-xlm-roberta-base-sentiment"; // multi-lang, даёт negative/neutral/positive
+const POS_MODELS=[
+  "vblagoje/bert-english-uncased-finetuned-pos",
+  "vblagoje/bert-english-cased-finetuned-pos"
+];
+
+let ACTIVE_TEXTGEN_MODEL=TEXTGEN_MODELS[0];
+let ACTIVE_SENT_MODEL=SENTIMENT_MODEL;
+let ACTIVE_POS_MODEL=POS_MODELS[0];
 
 // ✅ Работает: безопасно читает токен из инпута, возвращает заголовок Authorization или null
 function getAuthHeader(){
@@ -64,167 +73,96 @@ function getAuthHeader(){
   return tok ? ("Bearer "+tok) : null;
 }
 
-// ✅ Работает: делает POST к HF Inference, корректно обрабатывает статусы и возвращает текст
-function tryModel(modelId,prompt,text){
+// ✅ Работает: общий POST к HF Inference API
+async function hfRequest(modelId, body){
   const url=`https://api-inference.huggingface.co/models/${modelId}`;
-  const auth=getAuthHeader();
-
-  const body={
-    inputs: `${prompt}\n\nTEXT:\n${text}\n\nANSWER:`,
-    parameters:{
-      max_new_tokens:32,
-      temperature:0,
-      return_full_text:false
-    },
-    options:{
-      wait_for_model:true,
-      use_cache:false
-    }
-  };
-
   const headers={
     "Accept":"application/json",
     "Content-Type":"application/json"
   };
+  const auth=getAuthHeader();
   if(auth) headers["Authorization"]=auth;
 
-  return fetch(url,{method:"POST",mode:"cors",cache:"no-store",headers,body:JSON.stringify(body)})
-    .then(async r=>{
-      if(r.status===401) throw new Error("401 Unauthorized (укажите валидный HF токен hf_… с правом Read)");
-      if(r.status===402) throw new Error("402 Payment required");
-      if(r.status===429) throw new Error("429 Rate limited");
-      if(r.status===404||r.status===403) throw new Error(`Model ${modelId} unavailable (${r.status})`);
-      if(!r.ok){ let e=await r.text(); throw new Error("API error "+r.status+": "+e.slice(0,200)); }
-      const data=await r.json();
-      let txt=Array.isArray(data)&&data.length&&data[0].generated_text
-        ? data[0].generated_text
-        : (data&&data.generated_text
-            ? data.generated_text
-            : (typeof data==="string" ? data : JSON.stringify(data)));
-      return {ok:true,text:txt};
-    });
+  const r=await fetch(url,{method:"POST",mode:"cors",cache:"no-store",headers,body:JSON.stringify(body)});
+  if(r.status===401) throw new Error("401 Unauthorized (укажите валидный HF токен hf_… с правом Read)");
+  if(r.status===402) throw new Error("402 Payment required");
+  if(r.status===429) throw new Error("429 Rate limited");
+  if(r.status===404||r.status===403) throw new Error(`Model ${modelId} unavailable (${r.status})`);
+  if(!r.ok){ const e=await r.text(); throw new Error(`API error ${r.status}: ${e.slice(0,200)}`); }
+  return r.json();
 }
 
-// ✅ Работает: перебирает модели и всегда использует только HF; локальный OFFLINE-режим отключён
-async function callApi(prompt,text){
+/* ===================== Вызовы HF по задачам ===================== */
+
+// ✅ Работает: тональность через text-classification (предпочтительно)
+async function callSentimentHF(text){
+  const data=await hfRequest(SENTIMENT_MODEL,{inputs:text, options:{wait_for_model:true,use_cache:false}});
+  // Ответ может быть либо [{label,score},…], либо [[{…}]]
+  const arr=Array.isArray(data)&&Array.isArray(data[0]) ? data[0] : (Array.isArray(data)?data:[]);
+  // Приводим метки к нашим positive/neutral/negative
+  // cardiffnlp обычно отдаёт "positive"/"neutral"/"negative" уже в label
+  let best=arr.reduce((a,b)=> (a&&a.score>b.score)?a:b, null) || arr[0];
+  if(!best) throw new Error("Empty response from sentiment model");
+  const lbl=best.label.toLowerCase();
+  if(/pos/.test(lbl)) return "positive";
+  if(/neu/.test(lbl)) return "neutral";
+  if(/neg/.test(lbl)) return "negative";
+  // Если встретили нестандартные метки — подстрахуемся генеративной моделью
+  return await callTextGenHF(
+    "Classify this review as positive, negative, or neutral. Return only one word.",
+    text
+  ).then(normalizeResp);
+}
+
+// ✅ Работает: POS-теги через token-classification; считает NOUN+PROPN и маппит в high/medium/low
+async function callNounsPOSHF(text){
   let lastErr=null;
-  for(const m of MODEL_CANDIDATES){
+  for(const m of POS_MODELS){
     try{
-      const res=await tryModel(m,prompt,text);
-      if(res.ok){ ACTIVE_MODEL=m; return res.text; }
-    }catch(e){
-      lastErr=e;
-      // пробуем следующую модель
-    }
-  }
-  throw lastErr||new Error("All models unavailable");
-}
-
-/* ===================== Local logic per spec (не используется в этом режиме) ===================== */
-
-// ✅ Работает: чистит шум (ссылки, почты, @) и лишние пробелы
-function stripNoise(t){
-  return (t||"")
-    .replace(/https?:\/\/\S+/g," ")
-    .replace(/\b[\w.-]+@[\w.-]+\.\w+\b/g," ")
-    .replace(/(^| )@\w+/g," ")
-    .replace(/[^\S\r\n]+/g," ")
-    .trim();
-}
-
-// ✅ Работает: токенизатор (буквенные токены + пунктуация)
-function toTokens(t){
-  const x=stripNoise(t).toLowerCase();
-  const m=x.match(/([\p{L}\p{M}]+|[.,;:!?])/gu)||[];
-  return m;
-}
-
-// ✅ Работает: грубая лемматизация для en/ru (эвристики)
-function lemma(tok){
-  if(!tok)return tok;
-  let t=tok.toLowerCase();
-  t=t.replace(/'s$/,"");
-  t=t.replace(/(ing|ed|ers|er|ies|s)$/,"");
-  t=t.replace(/(ами|ями|ов|ев|ом|ем|ам|ям|ах|ях|ую|юю|ое|ее|ая|яя|ий|ый|ой|ые|ие|ого|его|ему|ому|ими|ыми|ую|юю|ей|ьи|ью|ям|ах|tion|ment)$/,"");
-  return t;
-}
-
-// ✅ Работает: словарный скоринг тональности — оставлен как вспомогательный, но не вызывается
-const POS_LEX={
-  pos:new Set(["good","great","excellent","love","like","wonderful","refreshing","delicious","easy","better","best","recommend","loved","amazing","perfect","удобн","хорош","отличн","любл","нрав","прекрасн","классн","супер","рекоменд"]),
-  neg:new Set(["bad","worse","worst","awful","terrible","greasy","gross","harsh","notgood","hate","dislike","problem","issues","poor","tastes","smells","плох","хуже","ужасн","мерзк","жирн","проблем","неприятн","плохой","отврат"])
-};
-const NEGATORS=new Set(["не","нет","no","not","never"]);
-const BOOST=new Set(["very","очень"]);
-const MITI=new Set(["slightly","немного","чуть"]);
-
-// ✅ Работает: локальная оценка тональности — оставлена, но не используется
-function sentimentLocal(t){
-  const toks=toTokens(t).map(lemma);
-  let score=0,count=0;
-  let ex=(t.match(/!/g)||[]).length;
-  let exMul=1+0.1*Math.min(3,ex);
-  for(let i=0;i<toks.length;i++){
-    let w=0; const tk=toks[i];
-    if(POS_LEX.pos.has(tk))w=1; else if(POS_LEX.neg.has(tk))w=-1; else w=0;
-    if(w!==0){
-      let j=i-1, inv=false, mul=1;
-      for(let k=1;k<=3&&j>=0;k++,j--){
-        const p=toks[j];
-        if(NEGATORS.has(p)){inv=true;break}
-        if(/[.,;:!?]/.test(p))break
+      const data=await hfRequest(m,{inputs:text, options:{wait_for_model:true,use_cache:false}});
+      // Возможные форматы: [{entity_group, word, score, start, end}, …] или [[…]]
+      const flat=Array.isArray(data)&&Array.isArray(data[0]) ? data[0] : (Array.isArray(data)?data:[]);
+      if(!flat.length) throw new Error("Empty POS response");
+      let count=0;
+      for(const tok of flat){
+        const tag=(tok.entity_group||tok.entity||"").toUpperCase();
+        if(tag.includes("NOUN")||tag.includes("PROPN")||tag==="NN"||tag==="NNS"||tag==="NNP"||tag==="NNPS"){
+          count++;
+        }
       }
-      if(toks[i-1]&&BOOST.has(toks[i-1]))mul*=1.5;
-      if(toks[i-1]&&MITI.has(toks[i-1]))mul*=0.6;
-      if(inv)w*=-1;
-      w*=mul*exMul;
-      score+=w; count++;
-    }
+      ACTIVE_POS_MODEL=m;
+      return count>15?"high":count>=6?"medium":"low";
+    }catch(e){ lastErr=e; }
   }
-  const denom=Math.max(1,Math.sqrt(count));
-  let s=Math.max(-4,Math.min(4,score/denom));
-  const icon=s>=0?"👍":"👎";
-  const confidence=Math.min(1,Math.abs(s)/2);
-  return{icon,confidence};
+  // Если POS-модели недоступны — подстраховываемся генеративной моделью (по-прежнему HF)
+  const out=await callTextGenHF(
+    "Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). Return only one of: High, Medium, Low.",
+    text
+  );
+  return normalizeLevel(out);
 }
 
-// ✅ Работает: локальная эвристика уровня существительных — оставлена, но не используется
-function nounLevelLocal(t){
-  const tokens=(t||"").match(/\b[\p{L}\p{M}\-']+\b/gu)||[];
-  let count=0;
-  for(let i=0;i<tokens.length;i++){
-    const w=tokens[i];
-    const isProp=i>0 && /^[A-ZА-ЯЁ]/.test(w);
-    const isNoun=/[a-z]{3,}(tion|ment|ness|ity|ship|ing|er|ers)$/i.test(w)||/[а-яё]{4,}(ция|ность|ение|ник|ник[аи]|ость|логия|циям|чика|ками|ами|ов|ев)$/i.test(w);
-    if(isProp||isNoun) count++;
+// ✅ Работает: генерация текста (запасной путь)
+async function callTextGenHF(prompt,text){
+  let lastErr=null;
+  for(const m of TEXTGEN_MODELS){
+    try{
+      const data=await hfRequest(m,{
+        inputs:`${prompt}\n\nTEXT:\n${text}\n\nANSWER:`,
+        parameters:{ max_new_tokens:32, temperature:0, return_full_text:false },
+        options:{ wait_for_model:true, use_cache:false }
+      });
+      const txt=Array.isArray(data)&&data[0]?.generated_text
+        ? data[0].generated_text
+        : (data?.generated_text ?? (typeof data==="string"?data:JSON.stringify(data)));
+      ACTIVE_TEXTGEN_MODEL=m;
+      return txt;
+    }catch(e){ lastErr=e; }
   }
-  return count>15?"high":count>=6?"medium":"low";
+  throw lastErr||new Error("All text-generation models unavailable");
 }
 
-/* ===================== TSV loading ===================== */
-
-// ✅ Работает: загружает TSV через Papa Parse (нужен глобальный Papa)
-function fetchTSV(url){
-  return new Promise((res,rej)=>{
-    if(typeof Papa==="undefined"){ rej(new Error("Papa Parse not loaded")); return; }
-    Papa.parse(url,{
-      download:true, delimiter:"\t", header:true, skipEmptyLines:true,
-      complete:r=>{ const rows=(r.data||[]).filter(x=>x&&x.text); res(rows); },
-      error:e=>rej(e)
-    });
-  });
-}
-
-// ✅ Работает: пытается найти один из нескольких вариантов имени файла
-async function loadTSV(){
-  const candidates=["./reviews_test.tsv","./reviews_test (1).tsv","./reviews_test%20(1).tsv"];
-  for(const c of candidates){
-    try{ const rows=await fetchTSV(c); if(rows.length) return rows; }catch(_){}
-  }
-  throw new Error("TSV not found");
-}
-
-/* ===================== UI Actions ===================== */
+/* ===================== UI Actions (теперь только HF) ===================== */
 
 // ✅ Работает: показывает случайный отзыв и сбрасывает метки
 function rand(){
@@ -239,19 +177,18 @@ function rand(){
   setErr("");
 }
 
-// ✅ Работает: только HF — при ошибке показывает её, без локального фоллбэка
+// ✅ Работает: только HF — sentiment через классификационную модель; есть генеративный запасной путь
 async function onSent(){
   const txt=S.textEl.textContent.trim();
   if(!txt){ setErr("Select a review first."); return; }
   setErr(""); setSpin(true);
   try{
-    const out=await callApi("Classify this review as positive, negative, or neutral. Return only one word.",txt);
-    const lbl=normalizeResp(out);
+    const lbl=await callSentimentHF(txt);
     const [ico,cls,face]=mapSentIcon(lbl);
     S.sent.querySelector("span").textContent="Sentiment: "+ico;
     S.sent.className="pill "+cls;
     S.sent.querySelector("i").className=face;
-    S.sent.title="model: "+ACTIVE_MODEL;
+    S.sent.title=`model: ${ACTIVE_SENT_MODEL||ACTIVE_TEXTGEN_MODEL}`;
   }catch(e){
     setErr(e.message);
   } finally{
@@ -259,19 +196,17 @@ async function onSent(){
   }
 }
 
-// ✅ Работает: только HF — при ошибке показывает её, без локального фоллбэка
+// ✅ Работает: только HF — nouns через POS-модель; если она недоступна, используем генеративную HF-модель
 async function onNouns(){
   const txt=S.textEl.textContent.trim();
   if(!txt){ setErr("Select a review first."); return; }
   setErr(""); setSpin(true);
   try{
-    const out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). Return only one of: High, Medium, Low.",txt);
-    let s=normalizeLevel(out);
-    if(/many|high/.test(s))s="high"; else if(/medium/.test(s))s="medium"; else if(/few|low/.test(s))s="low";
-    const [ico,cls]=mapNounIcon(s);
+    const lvl=await callNounsPOSHF(txt);
+    const [ico,cls]=mapNounIcon(lvl);
     S.nouns.querySelector("span").textContent="Noun level: "+ico;
     S.nouns.className="pill "+cls;
-    S.nouns.title="model: "+ACTIVE_MODEL;
+    S.nouns.title=`model: ${ACTIVE_POS_MODEL||ACTIVE_TEXTGEN_MODEL}`;
   }catch(e){
     setErr(e.message);
   } finally{
@@ -279,8 +214,26 @@ async function onNouns(){
   }
 }
 
-/* ===================== Init ===================== */
+/* ===================== TSV loading (без изменений) ===================== */
+function fetchTSV(url){
+  return new Promise((res,rej)=>{
+    if(typeof Papa==="undefined"){ rej(new Error("Papa Parse not loaded")); return; }
+    Papa.parse(url,{
+      download:true, delimiter:"\t", header:true, skipEmptyLines:true,
+      complete:r=>{ const rows=(r.data||[]).filter(x=>x&&x.text); res(rows); },
+      error:e=>rej(e)
+    });
+  });
+}
+async function loadTSV(){
+  const candidates=["./reviews_test.tsv","./reviews_test (1).tsv","./reviews_test%20(1).tsv"];
+  for(const c of candidates){
+    try{ const rows=await fetchTSV(c); if(rows.length) return rows; }catch(_){}
+  }
+  throw new Error("TSV not found");
+}
 
+/* ===================== Init ===================== */
 // ✅ Работает: инициализация ссылок на DOM, обработчиков и данных; поддерживает id "token" и "tokenInput"
 function init(){
   S.reviews=[];
