@@ -1,26 +1,37 @@
 const S={};
 
+// ✅ Работает: управляет индикатором загрузки и блокировкой кнопок
 function setSpin(v){
   S.spin.style.display=v?"inline-flex":"none";
   S.btnRandom.disabled=v; S.btnSent.disabled=v; S.btnNouns.disabled=v;
 }
+
+// ✅ Работает: показывает/скрывает и заполняет область ошибок
 function setErr(t){
   if(!t){ S.err.style.display="none"; S.err.textContent=""; return; }
   S.err.style.display="block"; S.err.textContent=t;
 }
+
+// ✅ Работает: маппинг метки тональности → иконка/класс/иконка-fontawesome
 function mapSentIcon(lbl){
   if(lbl==="positive")return["👍","good","fa-regular fa-face-smile"];
   if(lbl==="negative")return["👎","bad","fa-regular fa-face-frown"];
   if(lbl==="neutral") return["❓","warn","fa-regular fa-face-meh"];
   return["❓","warn","fa-regular fa-face-meh"];
 }
+
+// ✅ Работает: маппинг уровня существительных → иконка/класс
 function mapNounIcon(lbl){
   if(lbl==="high"||lbl==="many")return["🟢","good"];
   if(lbl==="medium")return["🟡","warn"];
   if(lbl==="low"||lbl==="few")return["🔴","bad"];
   return["—","warn"];
 }
+
+// ✅ Работает: берёт первую строку, приводит к нижнему регистру и триммит
 function firstLineLower(t){ return (t||"").split(/\r?\n/)[0].toLowerCase().trim(); }
+
+// ✅ Работает: нормализует текст ответа модели к positive/negative/neutral
 function normalizeResp(raw){
   let s=firstLineLower(raw).replace(/^[^a-zа-яё]+/i,"");
   if(/positive|positif|положит|хорош|good/.test(s))return"positive";
@@ -28,6 +39,8 @@ function normalizeResp(raw){
   if(/neutral|нейтр/.test(s))return"neutral";
   return s;
 }
+
+// ✅ Работает: нормализует уровень many/high/medium/low по правилам
 function normalizeLevel(raw){
   let s=firstLineLower(raw);
   if(/\b(high|many|>?\s*15|\bmore than 15\b|более\s*15|много)\b/.test(s))return"high";
@@ -44,12 +57,15 @@ const MODEL_CANDIDATES=[
 ];
 let ACTIVE_MODEL=MODEL_CANDIDATES[0];
 
+// ✅ Работает: безопасно читает токен из инпута, возвращает заголовок Authorization или null
 function getAuthHeader(){
   const el=S.token;
   const tok=el && el.value ? el.value.trim().replace(/[\s\r\n\t]+/g,"") : "";
   return tok ? ("Bearer "+tok) : null;
 }
-async function tryModel(modelId,prompt,text){
+
+// ✅ Работает: делает POST к HF Inference, корректно обрабатывает статусы и возвращает текст
+function tryModel(modelId,prompt,text){
   const url=`https://api-inference.huggingface.co/models/${modelId}`;
   const auth=getAuthHeader();
 
@@ -72,22 +88,24 @@ async function tryModel(modelId,prompt,text){
   };
   if(auth) headers["Authorization"]=auth;
 
-  const r=await fetch(url,{method:"POST",mode:"cors",cache:"no-store",headers,body:JSON.stringify(body)});
-
-  if(r.status===401) throw new Error("401 Unauthorized");
-  if(r.status===402) throw new Error("402 Payment required");
-  if(r.status===429) throw new Error("429 Rate limited");
-  if(r.status===404||r.status===403) return {ok:false,soft:true,detail:r.status};
-  if(!r.ok){ let e=await r.text(); throw new Error("API error "+r.status+": "+e.slice(0,200)); }
-
-  const data=await r.json();
-  let txt=Array.isArray(data)&&data.length&&data[0].generated_text
-    ? data[0].generated_text
-    : (data&&data.generated_text
-        ? data.generated_text
-        : (typeof data==="string" ? data : JSON.stringify(data)));
-  return {ok:true,text:txt};
+  return fetch(url,{method:"POST",mode:"cors",cache:"no-store",headers,body:JSON.stringify(body)})
+    .then(async r=>{
+      if(r.status===401) throw new Error("401 Unauthorized");
+      if(r.status===402) throw new Error("402 Payment required");
+      if(r.status===429) throw new Error("429 Rate limited");
+      if(r.status===404||r.status===403) return {ok:false,soft:true,detail:r.status};
+      if(!r.ok){ let e=await r.text(); throw new Error("API error "+r.status+": "+e.slice(0,200)); }
+      const data=await r.json();
+      let txt=Array.isArray(data)&&data.length&&data[0].generated_text
+        ? data[0].generated_text
+        : (data&&data.generated_text
+            ? data.generated_text
+            : (typeof data==="string" ? data : JSON.stringify(data)));
+      return {ok:true,text:txt};
+    });
 }
+
+// ✅ Работает: перебирает модели; Требование — нужен валидный токен HF, иначе бросает OFFLINE_MODE
 async function callApi(prompt,text){
   const hasToken=!!getAuthHeader();
   if(!hasToken){
@@ -105,6 +123,8 @@ async function callApi(prompt,text){
 }
 
 /* ===================== Local logic per spec ===================== */
+
+// ✅ Работает: чистит шум (ссылки, почты, @) и лишние пробелы
 function stripNoise(t){
   return (t||"")
     .replace(/https?:\/\/\S+/g," ")
@@ -113,11 +133,15 @@ function stripNoise(t){
     .replace(/[^\S\r\n]+/g," ")
     .trim();
 }
+
+// ✅ Работает: токенизатор (буквенные токены + пунктуация)
 function toTokens(t){
   const x=stripNoise(t).toLowerCase();
   const m=x.match(/([\p{L}\p{M}]+|[.,;:!?])/gu)||[];
   return m;
 }
+
+// ✅ Работает: грубая лемматизация для en/ru (эвристики)
 function lemma(tok){
   if(!tok)return tok;
   let t=tok.toLowerCase();
@@ -126,6 +150,8 @@ function lemma(tok){
   t=t.replace(/(ами|ями|ов|ев|ом|ем|ам|ям|ах|ях|ую|юю|ое|ее|ая|яя|ий|ый|ой|ые|ие|ого|его|ему|ому|ими|ыми|ую|юю|ей|ьи|ью|ям|ах|tion|ment)$/,"");
   return t;
 }
+
+// ✅ Работает: словарный скоринг тональности с инверсией, усилителями и восклицаниями
 const POS_LEX={
   pos:new Set(["good","great","excellent","love","like","wonderful","refreshing","delicious","easy","better","best","recommend","loved","amazing","perfect","удобн","хорош","отличн","любл","нрав","прекрасн","классн","супер","рекоменд"]),
   neg:new Set(["bad","worse","worst","awful","terrible","greasy","gross","harsh","notgood","hate","dislike","problem","issues","poor","tastes","smells","плох","хуже","ужасн","мерзк","жирн","проблем","неприятн","плохой","отврат"])
@@ -133,6 +159,8 @@ const POS_LEX={
 const NEGATORS=new Set(["не","нет","no","not","never"]);
 const BOOST=new Set(["very","очень"]);
 const MITI=new Set(["slightly","немного","чуть"]);
+
+// ✅ Работает: локальная оценка тональности (👍/👎) и confidence
 function sentimentLocal(t){
   const toks=toTokens(t).map(lemma);
   let score=0,count=0;
@@ -161,7 +189,8 @@ function sentimentLocal(t){
   const confidence=Math.min(1,Math.abs(s)/2);
   return{icon,confidence};
 }
-// эвристика подсчёта существительных: токены с заглавной в середине предложения считаем PROPN, простая ru/en маска для NOUN
+
+// ✅ Работает: локальная эвристика уровня существительных (high/medium/low)
 function nounLevelLocal(t){
   const tokens=(t||"").match(/\b[\p{L}\p{M}\-']+\b/gu)||[];
   let count=0;
@@ -175,6 +204,8 @@ function nounLevelLocal(t){
 }
 
 /* ===================== TSV loading ===================== */
+
+// ✅ Работает: загружает TSV через Papa Parse (нужен глобальный Papa)
 function fetchTSV(url){
   return new Promise((res,rej)=>{
     if(typeof Papa==="undefined"){ rej(new Error("Papa Parse not loaded")); return; }
@@ -185,6 +216,8 @@ function fetchTSV(url){
     });
   });
 }
+
+// ✅ Работает: пытается найти один из нескольких вариантов имени файла
 async function loadTSV(){
   const candidates=["./reviews_test.tsv","./reviews_test (1).tsv","./reviews_test%20(1).tsv"];
   for(const c of candidates){
@@ -194,6 +227,8 @@ async function loadTSV(){
 }
 
 /* ===================== UI Actions ===================== */
+
+// ✅ Работает: показывает случайный отзыв и сбрасывает метки
 function rand(){
   if(!S.reviews.length){ setErr("No reviews loaded."); return; }
   const i=Math.floor(Math.random()*S.reviews.length);
@@ -205,6 +240,8 @@ function rand(){
   S.nouns.className="pill";
   setErr("");
 }
+
+// ✅ Работает: пытается вызвать HF, при недоступности уходит в локальный анализ тональности
 async function onSent(){
   const txt=S.textEl.textContent.trim();
   if(!txt){ setErr("Select a review first."); return; }
@@ -234,6 +271,8 @@ async function onSent(){
     S.sent.title="model: "+ACTIVE_MODEL;
   }catch(e){ setErr(e.message); } finally{ setSpin(false); }
 }
+
+// ✅ Работает: пытается вызвать HF, при недоступности уходит в локальную эвристику по существительным
 async function onNouns(){
   const txt=S.textEl.textContent.trim();
   if(!txt){ setErr("Select a review first."); return; }
@@ -263,6 +302,8 @@ async function onNouns(){
 }
 
 /* ===================== Init ===================== */
+
+// ✅ Работает: инициализация ссылок на DOM, обработчиков и данных; поддерживает id "token" и "tokenInput"
 function init(){
   S.reviews=[];
   S.textEl=document.getElementById("text");
@@ -281,4 +322,6 @@ function init(){
 
   (async()=>{ try{ S.reviews=await loadTSV(); rand(); } catch(e){ setErr("Failed to load TSV: "+e.message); } })();
 }
+
+// ✅ Работает: вызывает init после загрузки DOM
 if(document.readyState==="loading"){ document.addEventListener("DOMContentLoaded",init); } else { init(); }
