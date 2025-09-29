@@ -90,10 +90,10 @@ function tryModel(modelId,prompt,text){
 
   return fetch(url,{method:"POST",mode:"cors",cache:"no-store",headers,body:JSON.stringify(body)})
     .then(async r=>{
-      if(r.status===401) throw new Error("401 Unauthorized");
+      if(r.status===401) throw new Error("401 Unauthorized (укажите валидный HF токен hf_… с правом Read)");
       if(r.status===402) throw new Error("402 Payment required");
       if(r.status===429) throw new Error("429 Rate limited");
-      if(r.status===404||r.status===403) return {ok:false,soft:true,detail:r.status};
+      if(r.status===404||r.status===403) throw new Error(`Model ${modelId} unavailable (${r.status})`);
       if(!r.ok){ let e=await r.text(); throw new Error("API error "+r.status+": "+e.slice(0,200)); }
       const data=await r.json();
       let txt=Array.isArray(data)&&data.length&&data[0].generated_text
@@ -105,24 +105,22 @@ function tryModel(modelId,prompt,text){
     });
 }
 
-// ✅ Работает: перебирает модели; Требование — нужен валидный токен HF, иначе бросает OFFLINE_MODE
+// ✅ Работает: перебирает модели и всегда использует только HF; локальный OFFLINE-режим отключён
 async function callApi(prompt,text){
-  const hasToken=!!getAuthHeader();
-  if(!hasToken){
-    throw new Error("OFFLINE_MODE");
-  }
   let lastErr=null;
   for(const m of MODEL_CANDIDATES){
     try{
       const res=await tryModel(m,prompt,text);
       if(res.ok){ ACTIVE_MODEL=m; return res.text; }
-      lastErr=new Error("Model "+m+" unavailable ("+res.detail+")");
-    }catch(e){ if(String(e.message).startsWith("401")) throw e; lastErr=e; }
+    }catch(e){
+      lastErr=e;
+      // пробуем следующую модель
+    }
   }
   throw lastErr||new Error("All models unavailable");
 }
 
-/* ===================== Local logic per spec ===================== */
+/* ===================== Local logic per spec (не используется в этом режиме) ===================== */
 
 // ✅ Работает: чистит шум (ссылки, почты, @) и лишние пробелы
 function stripNoise(t){
@@ -151,7 +149,7 @@ function lemma(tok){
   return t;
 }
 
-// ✅ Работает: словарный скоринг тональности с инверсией, усилителями и восклицаниями
+// ✅ Работает: словарный скоринг тональности — оставлен как вспомогательный, но не вызывается
 const POS_LEX={
   pos:new Set(["good","great","excellent","love","like","wonderful","refreshing","delicious","easy","better","best","recommend","loved","amazing","perfect","удобн","хорош","отличн","любл","нрав","прекрасн","классн","супер","рекоменд"]),
   neg:new Set(["bad","worse","worst","awful","terrible","greasy","gross","harsh","notgood","hate","dislike","problem","issues","poor","tastes","smells","плох","хуже","ужасн","мерзк","жирн","проблем","неприятн","плохой","отврат"])
@@ -160,7 +158,7 @@ const NEGATORS=new Set(["не","нет","no","not","never"]);
 const BOOST=new Set(["very","очень"]);
 const MITI=new Set(["slightly","немного","чуть"]);
 
-// ✅ Работает: локальная оценка тональности (👍/👎) и confidence
+// ✅ Работает: локальная оценка тональности — оставлена, но не используется
 function sentimentLocal(t){
   const toks=toTokens(t).map(lemma);
   let score=0,count=0;
@@ -190,7 +188,7 @@ function sentimentLocal(t){
   return{icon,confidence};
 }
 
-// ✅ Работает: локальная эвристика уровня существительных (high/medium/low)
+// ✅ Работает: локальная эвристика уровня существительных — оставлена, но не используется
 function nounLevelLocal(t){
   const tokens=(t||"").match(/\b[\p{L}\p{M}\-']+\b/gu)||[];
   let count=0;
@@ -241,64 +239,44 @@ function rand(){
   setErr("");
 }
 
-// ✅ Работает: пытается вызвать HF, при недоступности уходит в локальный анализ тональности
+// ✅ Работает: только HF — при ошибке показывает её, без локального фоллбэка
 async function onSent(){
   const txt=S.textEl.textContent.trim();
   if(!txt){ setErr("Select a review first."); return; }
   setErr(""); setSpin(true);
   try{
-    let out;
-    try{
-      out=await callApi("Classify this review as positive, negative, or neutral. Return only one word.",txt);
-    }catch(apiErr){
-      if(String(apiErr.message)==="OFFLINE_MODE"||/404|401|403|402|Rate limited|unavailable/i.test(apiErr.message)){
-        const local=sentimentLocal(txt);
-        const lbl=local.icon==="👍"?"positive":"negative";
-        const [ico,cls,face]=mapSentIcon(lbl);
-        S.sent.querySelector("span").textContent="Sentiment: "+ico;
-        S.sent.className="pill "+cls;
-        S.sent.querySelector("i").className=face;
-        S.sent.title="local-only mode";
-        setSpin(false);
-        return;
-      }else{ throw apiErr; }
-    }
+    const out=await callApi("Classify this review as positive, negative, or neutral. Return only one word.",txt);
     const lbl=normalizeResp(out);
     const [ico,cls,face]=mapSentIcon(lbl);
     S.sent.querySelector("span").textContent="Sentiment: "+ico;
     S.sent.className="pill "+cls;
     S.sent.querySelector("i").className=face;
     S.sent.title="model: "+ACTIVE_MODEL;
-  }catch(e){ setErr(e.message); } finally{ setSpin(false); }
+  }catch(e){
+    setErr(e.message);
+  } finally{
+    setSpin(false);
+  }
 }
 
-// ✅ Работает: пытается вызвать HF, при недоступности уходит в локальную эвристику по существительным
+// ✅ Работает: только HF — при ошибке показывает её, без локального фоллбэка
 async function onNouns(){
   const txt=S.textEl.textContent.trim();
   if(!txt){ setErr("Select a review first."); return; }
   setErr(""); setSpin(true);
   try{
-    let out;
-    try{
-      out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). Return only one of: High, Medium, Low.",txt);
-    }catch(apiErr){
-      if(String(apiErr.message)==="OFFLINE_MODE"||/404|401|403|402|Rate limited|unavailable/i.test(apiErr.message)){
-        const lvl=nounLevelLocal(txt);
-        const [ico,cls]=mapNounIcon(lvl);
-        S.nouns.querySelector("span").textContent="Noun level: "+ico;
-        S.nouns.className="pill "+cls;
-        S.nouns.title="local-only mode";
-        setSpin(false);
-        return;
-      }else{ throw apiErr; }
-    }
+    const out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). Return only one of: High, Medium, Low.",txt);
     let s=normalizeLevel(out);
     if(/many|high/.test(s))s="high"; else if(/medium/.test(s))s="medium"; else if(/few|low/.test(s))s="low";
     const [ico,cls]=mapNounIcon(s);
     S.nouns.querySelector("span").textContent="Noun level: "+ico;
     S.nouns.className="pill "+cls;
     S.nouns.title="model: "+ACTIVE_MODEL;
-  }catch(e){ setErr(e.message); } finally{ setSpin(false); }
+  }catch(e){
+    setErr(e.message);
+  } finally{
+    setSpin(false);
+  }
 }
 
 /* ===================== Init ===================== */
