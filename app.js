@@ -36,45 +36,62 @@ function normalizeLevel(raw){
   return s;
 }
 
-/* ===================== Inference API =====================
-   Требование было использовать HF model. Но т.к. 404/401 встречаются
-   (особенно без токена), добавлен режим Fallback: если запрос к HF
-   недоступен, выполняем задачу локально по ТЗ (не блокируем UI).
-   Если у вас есть токен, введите его — тогда сначала попробуем HF.
-========================================================== */
+/* ===================== Inference API ===================== */
 const MODEL_CANDIDATES=[
-  "tiiuae/falcon-7b-instruct",              // по ТЗ
-  "Qwen/Qwen2.5-1.5B-Instruct",             // часто доступен
-  "mistralai/Mistral-7B-Instruct-v0.2",     // часто доступен
-  "TinyLlama/TinyLlama-1.1B-Chat-v1.0"      // лёгкий fallback
+  "HuggingFaceH4/smol-llama-3.2-1.7B-instruct",
+  "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+  "Qwen/Qwen2.5-1.5B-Instruct"
 ];
 let ACTIVE_MODEL=MODEL_CANDIDATES[0];
 
 function getAuthHeader(){
-  let tok=(S.token.value||"").trim().replace(/[\s\r\n\t]+/g,"");
-  return tok?("Bearer "+tok):null;
+  const el=S.token;
+  const tok=el && el.value ? el.value.trim().replace(/[\s\r\n\t]+/g,"") : "";
+  return tok ? ("Bearer "+tok) : null;
 }
 async function tryModel(modelId,prompt,text){
   const url=`https://api-inference.huggingface.co/models/${modelId}`;
-  const headers=new Headers();
-  headers.set("Accept","application/json");
-  headers.set("Content-Type","application/json; charset=utf-8");
-  headers.set("X-Wait-For-Model","true");
-  const auth=getAuthHeader(); if(auth) headers.set("Authorization",auth);
-  const r=await fetch(url,{method:"POST",mode:"cors",cache:"no-store",headers,body:JSON.stringify({inputs:prompt+text})});
+  const auth=getAuthHeader();
+
+  const body={
+    inputs: `${prompt}\n\nTEXT:\n${text}\n\nANSWER:`,
+    parameters:{
+      max_new_tokens:32,
+      temperature:0,
+      return_full_text:false
+    },
+    options:{
+      wait_for_model:true,
+      use_cache:false
+    }
+  };
+
+  const headers={
+    "Accept":"application/json",
+    "Content-Type":"application/json"
+  };
+  if(auth) headers["Authorization"]=auth;
+
+  const r=await fetch(url,{method:"POST",mode:"cors",cache:"no-store",headers,body:JSON.stringify(body)});
+
   if(r.status===401) throw new Error("401 Unauthorized");
   if(r.status===402) throw new Error("402 Payment required");
   if(r.status===429) throw new Error("429 Rate limited");
   if(r.status===404||r.status===403) return {ok:false,soft:true,detail:r.status};
   if(!r.ok){ let e=await r.text(); throw new Error("API error "+r.status+": "+e.slice(0,200)); }
+
   const data=await r.json();
-  let txt=Array.isArray(data)&&data.length&&data[0].generated_text?data[0].generated_text:(data&&data.generated_text?data.generated_text:(typeof data==="string"?data:JSON.stringify(data)));
+  let txt=Array.isArray(data)&&data.length&&data[0].generated_text
+    ? data[0].generated_text
+    : (data&&data.generated_text
+        ? data.generated_text
+        : (typeof data==="string" ? data : JSON.stringify(data)));
   return {ok:true,text:txt};
 }
 async function callApi(prompt,text){
   const hasToken=!!getAuthHeader();
   if(!hasToken){
-    throw new Error("OFFLINE_MODE"); // без токена у многих моделей 401/404 — сразу в локальный режим
+    throw new Error("OFFLINE_MODE");
   }
   let lastErr=null;
   for(const m of MODEL_CANDIDATES){
@@ -195,7 +212,7 @@ async function onSent(){
   try{
     let out;
     try{
-      out=await callApi("Classify this review as positive, negative, or neutral: ",txt);
+      out=await callApi("Classify this review as positive, negative, or neutral. Return only one word.",txt);
     }catch(apiErr){
       if(String(apiErr.message)==="OFFLINE_MODE"||/404|401|403|402|Rate limited|unavailable/i.test(apiErr.message)){
         const local=sentimentLocal(txt);
@@ -224,7 +241,7 @@ async function onNouns(){
   try{
     let out;
     try{
-      out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). ",txt);
+      out=await callApi("Count the nouns in this review and return only High (>15), Medium (6-15), or Low (<6). Return only one of: High, Medium, Low.",txt);
     }catch(apiErr){
       if(String(apiErr.message)==="OFFLINE_MODE"||/404|401|403|402|Rate limited|unavailable/i.test(apiErr.message)){
         const lvl=nounLevelLocal(txt);
@@ -254,7 +271,7 @@ function init(){
   S.btnRandom=document.getElementById("btnRandom");
   S.btnSent=document.getElementById("btnSent");
   S.btnNouns=document.getElementById("btnNouns");
-  S.token=document.getElementById("token");
+  S.token=document.getElementById("token")||document.getElementById("tokenInput");
   S.sent=document.getElementById("sent");
   S.nouns=document.getElementById("nouns");
 
